@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PWA Offline</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    body { font-family: Arial, sans-serif; max-width:900px; margin:16px auto; padding:0 12px; }
+    h1 { font-size:20px; }
+    form { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+    input, button { padding:8px; font-size:14px; }
+    table { width:100%; border-collapse:collapse; margin-top:12px; }
+    th,td { border:1px solid #ddd; padding:8px; text-align:left; }
+    .controls { display:flex; gap:8px; margin-top:8px; }
+    .chart-wrap { width:100%; height:300px; margin-top:18px; }
+  </style>
+</head>
+<body>
+  <h1>Registro Offline</h1>
+
+  <form id="form">
+    <input id="nombre" placeholder="Nombre" required />
+    <input id="valor" type="number" placeholder="Valor" required step="any" />
+    <button type="submit">Agregar</button>
+    <button type="button" id="exportCSV">Exportar CSV</button>
+  </form>
+
+  <div class="controls">
+    <label>Filtrar: <input id="filtro" placeholder="Escribe para filtrar" /></label>
+    <button id="borrarTodo">Borrar todo</button>
+  </div>
+
+  <table id="tabla">
+    <thead><tr><th>ID</th><th>Nombre</th><th>Valor</th><th>Fecha</th><th>Acciones</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <div class="chart-wrap">
+    <canvas id="miGrafico"></canvas>
+  </div>
+
+  <!-- Chart.js (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+/* IndexedDB helper */
+const DB_NAME = 'mi_db_offline_simple';
+const STORE = 'registros';
+const DB_VERSION = 1;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        const os = db.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+        os.createIndex('nombre', 'nombre', { unique: false });
+        os.createIndex('fecha', 'fecha', { unique: false });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function addRegistro(reg) {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).add(reg);
+    tx.oncomplete = () => res(true);
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+async function getAll() {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+
+async function deleteAll() {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).clear();
+    tx.oncomplete = () => res(true);
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+async function deleteById(id) {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).delete(Number(id));
+    tx.oncomplete = () => res(true);
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+/* UI & Chart */
+const form = document.getElementById('form');
+const tablaBody = document.querySelector('#tabla tbody');
+const filtro = document.getElementById('filtro');
+const exportCSVBtn = document.getElementById('exportCSV');
+const borrarTodoBtn = document.getElementById('borrarTodo');
+const ctx = document.getElementById('miGrafico').getContext('2d');
+let chart = null;
+
+async function refreshUI() {
+  const datos = await getAll();
+  const q = filtro.value.trim().toLowerCase();
+
+  tablaBody.innerHTML = '';
+  datos.filter(r => r.nombre.toLowerCase().includes(q)).forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.id}</td>
+      <td>${r.nombre}</td>
+      <td>${r.valor}</td>
+      <td>${new Date(r.fecha).toLocaleString()}</td>
+      <td><button data-id="${r.id}" class="del">Eliminar</button></td>
+    `;
+    tablaBody.appendChild(tr);
+  });
+
+  // aggregate by name
+  const agg = {};
+  datos.forEach(d => { agg[d.nombre] = (agg[d.nombre] || 0) + Number(d.valor); });
+  const labels = Object.keys(agg);
+  const values = labels.map(l => agg[l]);
+
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Suma de valores', data: values }] },
+    options: { responsive: true, maintainAspectRatio: false }
+  });
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const nombre = document.getElementById('nombre').value.trim();
+  const valor = document.getElementById('valor').value;
+  if (!nombre || valor === '') return alert('Completa los campos');
+  await addRegistro({ nombre, valor: Number(valor), fecha: new Date().toISOString() });
+  form.reset();
+  await refreshUI();
+});
+
+tablaBody.addEventListener('click', async (e) => {
+  if (e.target.classList.contains('del')) {
+    const id = e.target.dataset.id;
+    await deleteById(id);
+    await refreshUI();
+  }
+});
+
+filtro.addEventListener('input', refreshUI);
+
+exportCSVBtn.addEventListener('click', async () => {
+  const datos = await getAll();
+  if (!datos.length) return alert('No hay datos para exportar');
+  const csv = ['id,nombre,valor,fecha', ...datos.map(r => `${r.id},"${r.nombre}",${r.valor},${r.fecha}`)].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'registros.csv'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+borrarTodoBtn.addEventListener('click', async () => {
+  if (!confirm('Borrar todos los registros?')) return;
+  await deleteAll();
+  await refreshUI();
+});
+
+// init
+refreshUI();
+
+// service worker registration
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW fallo', err));
+}
+</script>
+</body>
+</html>
